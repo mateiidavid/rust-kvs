@@ -9,10 +9,14 @@ description = "\nDistributed in-memory key value data store written in Rust!\nPa
 
 [dependencies]
 clap = "2.33.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.58"
 
 [dev-dependencies]
 assert_cmd = "0.11.0"
 predicates = "1.0.0"
+tempfile = "3.0.7"
+walkdir = "2.2.7"
 
 [[bin]]
 name = "kvs"
