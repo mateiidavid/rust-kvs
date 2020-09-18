@@ -2,8 +2,8 @@ use clap::{App, Arg};
 fn main() {
     let matches = App::new(env!("CARGO_PKG_NAME"))
                                   .version(env!("CARGO_PKG_VERSION"))
-                                  .author("Matei David <matei.david.35@gmail.com>")
-                                  .about("\nDistributed in-memory key value data store written in Rust!\nPart of my #100DaysOfCode challenge")
+                                  .author(env!("CARGO_PKG_AUTHORS"))
+                                  .about(env!("CARGO_PKG_DESCRIPTION"))
                                   .subcommand(
                                     App::new("get")
                                             .about("Get the string value of given key")
