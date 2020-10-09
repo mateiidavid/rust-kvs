@@ -2,7 +2,7 @@
 //! following the [ping-cap talent plant](https://github.com/pingcap/talent-plan/blob/master/courses/rust/projects/project-1/README.md)
 //#![deny(missing_docs)]
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, fmt, io, io::Write, path::PathBuf};
+use std::{collections::HashMap, env, fmt, io, io::prelude::*, path::PathBuf};
 /*
  * A good structure for documentation (used in stdl) is:
    - [short explanation of what item does]\n
@@ -19,7 +19,7 @@ pub enum KvStoreError {
     Io(io::Error),
     Serde(serde_json::Error),
     // Errors from this lib
-    Regular(ErrorKind),
+    Store(ErrorKind),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialOrd, PartialEq, Ord)]
@@ -41,7 +41,7 @@ impl fmt::Display for KvStoreError {
         match self {
             KvStoreError::Io(err) => err.fmt(f),
             KvStoreError::Serde(err) => err.fmt(f),
-            KvStoreError::Regular(err) => write!(f, "KvStore error occurred {:?}", err),
+            KvStoreError::Store(err) => write!(f, "KvStore error occurred {:?}", err),
         }
     }
 }
@@ -74,7 +74,7 @@ enum Command {
 /// the <KV> store.
 pub struct KvStore {
     map: HashMap<String, String>,
-    file_buf: io::BufWriter<std::fs::File>,
+    write_buf: io::BufWriter<std::fs::File>,
 }
 
 impl KvStore {
@@ -86,11 +86,11 @@ impl KvStore {
             .create(true)
             .open("log.json")?;
 
-        let file_buf = std::io::BufWriter::new(file);
+        let mut write_buf = std::io::BufWriter::new(file);
 
         Ok(KvStore {
             map: HashMap::new(),
-            file_buf,
+            write_buf,
         })
     }
 
@@ -101,17 +101,28 @@ impl KvStore {
 
     /// Store a value inside the KvStore using a key that can be subsequently used to retrieve the value
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let log_cmd = Command::Set { key, value };
+        let log_cmd = Command::Set {
+            key: key.clone(),
+            value: value.clone(),
+        };
         let serialized_cmd = serde_json::to_string(&log_cmd)?;
-        writeln!(self.file_buf, "{},", &serialized_cmd)?;
-        self.file_buf.flush()?;
+        writeln!(self.write_buf, "{}", &serialized_cmd)?;
+        self.write_buf.flush()?;
+        self.map.insert(key, value);
         Ok(())
     }
 
     /// Remove a variable from the KvStore
     pub fn remove(&mut self, key: String) -> Result<()> {
-        self.map.remove(&key);
-        Ok(())
+        match self.map.remove(&key) {
+            Some(v) => {
+                let serialized_cmd = serde_json::to_string(&Command::Rm { key })?;
+                writeln!(self.write_buf, "{}", &serialized_cmd)?;
+                Ok(())
+            }
+
+            None => Err(KvStoreError::Store(ErrorKind::NotFound)),
+        }
     }
 
     ///
@@ -121,6 +132,29 @@ impl KvStore {
         env::set_current_dir(&path)?;
         let store = KvStore::new()?;
         Ok(store)
+    }
+
+    pub fn replay(&mut self) -> Result<()> {
+        let f = std::fs::File::open("log.json")?;
+        let commands: Vec<std::result::Result<Command, serde_json::Error>> =
+            std::io::BufReader::new(f)
+                .lines()
+                .map(|line| serde_json::from_str(&line.unwrap()))
+                .collect();
+
+        for command in commands {
+            let command = command?;
+            match command {
+                Command::Set { key, value } => {
+                    self.map.insert(key, value);
+                }
+                Command::Rm { key } => {
+                    self.map.remove(&key);
+                }
+            }
+        }
+        println!("{:?}", self.map);
+        Ok(())
     }
 }
 

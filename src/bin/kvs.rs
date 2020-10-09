@@ -35,11 +35,14 @@ fn main() -> Result<()> {
             let val = matches.value_of("VALUE").unwrap();
             let current_dir = std::env::current_dir()?;
             kvs::KvStore::open(current_dir)?.set(key.to_owned(), val.to_owned())?;
-            println!("Set {} to value {}", key, val);
         }
         Some("rm") => {
-            eprintln!("unimplemented");
-            std::process::exit(1);
+            let matches = matches.subcommand_matches("rm").unwrap();
+            let key = matches.value_of("KEY").unwrap();
+            let current_dir = std::env::current_dir()?;
+            let mut store = kvs::KvStore::open(current_dir)?;
+            store.replay()?;
+            store.remove(key.to_owned())?;
         }
         _ => {
             std::process::exit(1);
