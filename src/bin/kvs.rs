@@ -26,8 +26,15 @@ fn main() -> Result<()> {
 
     match matches.subcommand_name() {
         Some("get") => {
-            eprintln!("unimplemented");
-            std::process::exit(1);
+            let matches = matches.subcommand_matches("get").unwrap();
+            let key = matches.value_of("KEY").unwrap();
+            let current_dir = std::env::current_dir()?;
+            let mut store = kvs::KvStore::open(current_dir)?;
+            match store.get(key.to_owned())? {
+                Some(value) => println!("{}", value),
+                None => println!("{}", "Key not found"),
+            }
+            std::process::exit(0);
         }
         Some("set") => {
             let matches = matches.subcommand_matches("set").unwrap();
@@ -41,8 +48,13 @@ fn main() -> Result<()> {
             let key = matches.value_of("KEY").unwrap();
             let current_dir = std::env::current_dir()?;
             let mut store = kvs::KvStore::open(current_dir)?;
-            store.replay()?;
-            store.remove(key.to_owned())?;
+            match store.remove(key.to_owned()) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    println!("{}", "Key not found");
+                    std::process::exit(1)
+                }
+            }
         }
         _ => {
             std::process::exit(1);
