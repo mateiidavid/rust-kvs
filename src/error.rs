@@ -19,7 +19,6 @@ impl ErrorKind {
     fn as_str(&self) -> &str {
         match self {
             ErrorKind::NotFound => "Key not found",
-            _ => "something else",
         }
     }
 }
