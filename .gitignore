@@ -1,3 +1,5 @@
 /target
+/store
+*-log.json
 Cargo.lock
 log.json

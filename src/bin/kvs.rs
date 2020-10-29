@@ -1,5 +1,7 @@
 use clap::{App, Arg};
 use kvs::Result;
+
+const STORE_DIR: &str = "/Users/madavid/dev/self/code/rust-kvs/store/";
 //TODO: use structopt
 fn main() -> Result<()> {
     let matches = App::new(env!("CARGO_PKG_NAME"))
@@ -28,29 +30,26 @@ fn main() -> Result<()> {
         Some("get") => {
             let matches = matches.subcommand_matches("get").unwrap();
             let key = matches.value_of("KEY").unwrap();
-            let current_dir = std::env::current_dir()?;
-            let mut store = kvs::KvStore::open(current_dir)?;
+            let mut store = kvs::KvStore::open(STORE_DIR)?;
             match store.get(key.to_owned())? {
                 Some(value) => println!("{}", value),
                 None => println!("{}", "Key not found"),
             }
-            std::process::exit(0);
+            std::process::exit(0)
         }
         Some("set") => {
             let matches = matches.subcommand_matches("set").unwrap();
             let key = matches.value_of("KEY").unwrap();
             let val = matches.value_of("VALUE").unwrap();
-            let current_dir = std::env::current_dir()?;
-            kvs::KvStore::open(current_dir)?.set(key.to_owned(), val.to_owned())?;
+            kvs::KvStore::open(STORE_DIR)?.set(key.to_owned(), val.to_owned())?;
         }
         Some("rm") => {
             let matches = matches.subcommand_matches("rm").unwrap();
             let key = matches.value_of("KEY").unwrap();
-            let current_dir = std::env::current_dir()?;
-            let mut store = kvs::KvStore::open(current_dir)?;
+            let mut store = kvs::KvStore::open(STORE_DIR)?;
             match store.remove(key.to_owned()) {
                 Ok(()) => std::process::exit(0),
-                Err(e) => {
+                Err(_) => {
                     println!("{}", "Key not found");
                     std::process::exit(1)
                 }
