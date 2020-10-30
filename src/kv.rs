@@ -2,12 +2,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{prelude::*, BufReader, BufWriter, Seek, SeekFrom};
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, path::Path, path::PathBuf};
 
 use crate::{ErrorKind, KvStoreError, Result};
 // For now, will pick JSON but as I benchmark I will be thinking
 // of moving to MessagePack
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "command")]
 enum Command {
     Set { key: String, value: String },
@@ -17,17 +17,22 @@ enum Command {
 /// `KvStore` is a simple struct wrapper over a `std::collection::HashMap` to give some abstraction
 /// to the <KV> store.
 pub struct KvStore {
-    map: HashMap<String, FPos>,
+    idx: HashMap<String, CmdPos>,
     writer: BufPosWriter<File>,
     readers: HashMap<usize, BufPosReader<File>>,
     active_id: usize,
+    total_sz: usize,
+    path: PathBuf, // Credit to pingcap guide
 }
 
-struct FPos {
+#[derive(Debug)]
+pub struct CmdPos {
     f_id: usize,
-    start: usize,
-    length: usize,
+    pos: usize,
+    sz: usize,
 }
+
+const MAX_STORE_SZ: usize = 2048;
 //TODO: add env var to open @ specific folder
 /* Todo: compaction
  * To do compaction, we will do this:
@@ -39,33 +44,44 @@ struct FPos {
  *    to
  *    - delete the old files and only have the merged one.\
  *    - mark each file as active, the way Bitcask does.
- *
- * First step: write a file limit
- * Update: we first have to switch to using usize as file id
+ * Step now: implement total_sz to keep track of size of current active file
 */
 impl KvStore {
     /// Create a new instance of KvStore by in turn creating a HashMap
     fn new(
         writer: BufPosWriter<File>,
         readers: HashMap<usize, BufPosReader<File>>,
+        idx: HashMap<String, CmdPos>,
         active_id: usize,
+        total_sz: usize,
+        path: PathBuf,
     ) -> Result<Self> {
         Ok(KvStore {
-            map: HashMap::new(),
+            idx,
             writer,
             readers,
             active_id,
+            total_sz,
+            path,
         })
     }
 
     /// Retrieve a variable from the KvStore and return as an Option<String> depending on whether
     /// the key exists
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        if let Some(fp) = self.map.get(&key) {
-            if let Some(reader) = self.readers.get_mut(&fp.f_id) {
-                Self::read_value(reader, &fp)
+        if let Some(p) = self.idx.get(&key) {
+            let reader = self
+                .readers
+                .get_mut(&p.f_id)
+                .expect("could not get reader associated with key");
+            let mut buf = vec![0u8; p.sz];
+            reader.seek(SeekFrom::Start(p.pos as u64))?;
+            reader.read(&mut buf)?;
+            let cmd: Command = serde_json::from_slice(&buf)?;
+            if let Command::Set { key: _, value } = cmd {
+                Ok(Some(value))
             } else {
-                Err(KvStoreError::Store(ErrorKind::NotFound))
+                Err(KvStoreError::Store(ErrorKind::UnsupportedCommand))
             }
         } else {
             Ok(None)
@@ -80,53 +96,50 @@ impl KvStore {
             value,
         };
         let cmd = serde_json::to_string(&log_cmd)?;
-        let cmd = format!("{}\n", cmd);
-        let num = self.writer.write(cmd.as_bytes())?;
-        self.map.insert(
-            key,
-            FPos {
-                f_id: self.active_id,
-                start: self.writer.pos,
-                length: num,
-            },
-        );
+        let pos = self.writer.pos;
+        let sz = self.writer.write(cmd.as_bytes())?;
+        let pos = CmdPos {
+            f_id: self.active_id,
+            pos,
+            sz,
+        };
+        self.idx.insert(key, pos);
         self.writer.flush()?;
-        Ok(())
+        self.total_sz += sz;
+
+        if self.total_sz >= MAX_STORE_SZ {
+            self.compact()
+        } else {
+            Ok(())
+        }
     }
 
     /// Remove a variable from the KvStore
     pub fn remove(&mut self, key: String) -> Result<()> {
-        if self.map.contains_key(&key) {
+        if self.idx.contains_key(&key) {
             let cmd = serde_json::to_string(&Command::Rm {
                 key: key.to_owned(),
             })?;
-            let cmd = format!("{}\n", cmd);
-            let num = self.writer.write(cmd.as_bytes())?;
-            self.map.insert(
-                key,
-                FPos {
-                    f_id: self.active_id,
-                    start: self.writer.pos,
-                    length: num,
-                },
-            );
+            let sz = self.writer.write(cmd.as_bytes())?;
+            self.idx.remove(&key);
             self.writer.flush()?;
-            Ok(())
+            self.total_sz += sz;
+
+            if self.total_sz >= MAX_STORE_SZ {
+                self.compact()
+            } else {
+                Ok(())
+            }
         } else {
             Err(KvStoreError::Store(ErrorKind::NotFound))
         }
     }
 
     ///
-    //TODO: Currently, we want to switch from keeping string values to just using file ids
-    // for now, it won't be smart NOT to deal with file name as string, lots of conversions to do
-    // what we should do (maybe) is do a conversion, keep array of just file numbers and figure out
-    // which one is max to denote active file
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
         let path = path.into();
         std::fs::create_dir_all(&path)?;
-        env::set_current_dir(&path)?;
-        let files = std::fs::read_dir(&path)?
+        let mut files = std::fs::read_dir(&path)?
             .filter_map(std::io::Result::ok)
             .filter_map(|e| match e.file_name().to_str() {
                 Some(v) => {
@@ -141,17 +154,26 @@ impl KvStore {
             })
             .collect::<Vec<String>>();
 
+        files.sort();
+        let mut total_sz = 0usize;
         let mut readers: HashMap<usize, BufPosReader<File>> = HashMap::new();
+        let mut idx: HashMap<String, CmdPos> = HashMap::new();
         for f_name in files.iter() {
-            let file = File::open(&f_name)?;
-            let reader = BufPosReader::new(file)?;
+            let file = File::open(path.join(f_name))?;
+            let mut reader = BufPosReader::new(file)?;
             //TODO: Remove unwraps, looks ugly af
             let f_name = f_name
                 .find('-')
                 .map(|i| Some(f_name[..i].to_owned()))
-                .map(|name| name.unwrap().parse::<usize>().unwrap())
-                .unwrap();
+                .map(|name| {
+                    name.unwrap()
+                        .parse::<usize>()
+                        .expect("file name not supported")
+                })
+                .expect("failed to parse file name");
 
+            let file_sz = replay(&mut reader, &mut idx, f_name)?;
+            total_sz += file_sz;
             readers.insert(f_name, reader);
         }
 
@@ -163,78 +185,113 @@ impl KvStore {
             active_file = std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
-                .open(file_name)?;
+                .write(true)
+                .open(path.join(file_name))?;
         } else {
             active_id = 0;
             active_file = std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
+                .write(true)
                 .create(true)
-                .open("0-log.json")?;
+                .open(path.join("0-log.json"))?;
 
-            let f = File::open("0-log.json")?;
+            let f = File::open(path.join("0-log.json"))?;
             let f = BufPosReader::new(f)?;
             readers.insert(0, f);
         }
-        let writer = BufPosWriter::new(active_file)?;
-
-        let mut store = KvStore::new(writer, readers, active_id)?;
-        store.replay(files)?;
+        let mut writer = BufPosWriter::new(active_file)?;
+        writer.seek(SeekFrom::End(0))?;
+        let store = KvStore::new(writer, readers, idx, active_id, total_sz, path)?;
         Ok(store)
     }
 
-    pub fn replay(&mut self, files: Vec<String>) -> Result<()> {
-        for f_name in files {
-            let f = std::fs::File::open(&f_name)?;
-            let mut f = BufReader::new(f);
+    fn compact(&mut self) -> Result<()> {
+        // To compact we first need to get a list of all files
+        // then, for every file, we take its ID --> find it's reader, remove from map
+        // close (if applicable)
+        // close writer (& fush)
+        // delete all files, create new file, replace writer
+        self.active_id += 1;
+        self.total_sz = 0;
+        let file_path = log_path(&self.path, self.active_id);
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .write(true)
+            .create(true)
+            .open(&file_path)?;
 
-            let mut line = String::new();
-            let mut pos = 0 as usize;
-            while let Ok(num) = f.read_line(&mut line) {
-                if num == 0 {
-                    break;
-                }
-                let cmd: Command = serde_json::from_str(&line)?;
-                let f_id = f_name
-                    .find('-')
-                    .map(|i| Some(f_name[..i].to_owned()))
-                    .map(|name| name.unwrap().parse::<usize>().unwrap())
-                    .unwrap();
-                if let Command::Set { key, .. } = cmd {
-                    self.map.insert(
-                        key,
-                        FPos {
-                            f_id,
-                            start: pos,
-                            length: num - 1,
-                        },
-                    );
-                } else if let Command::Rm { key } = cmd {
-                    self.map.remove(&key);
-                }
+        self.writer = BufPosWriter::new(f)?;
+        self.writer.seek(SeekFrom::End(0))?;
 
-                pos += num;
-                line.clear();
-            }
+        for v in self.idx.values_mut() {
+            let reader = self
+                .readers
+                .get_mut(&v.f_id)
+                .expect("could not get reader associated with key");
+            let mut buf = vec![0u8; v.sz];
+            reader.seek(SeekFrom::Start(v.pos as u64))?;
+            reader.read(&mut buf)?;
+            let pos = self.writer.pos;
+            let sz = self.writer.write(&buf)?;
+            *v = CmdPos {
+                f_id: self.active_id,
+                pos,
+                sz,
+            };
+            self.writer.flush()?;
+            self.total_sz += sz;
         }
+
+        let files = self
+            .readers
+            .keys()
+            .map(|id| log_path(&self.path, *id))
+            .collect::<Vec<PathBuf>>();
+
+        self.readers = HashMap::new();
+        let f = File::open(&file_path)?;
+        let mut reader = BufPosReader::new(f)?;
+        reader.seek(SeekFrom::Start(0))?;
+        self.readers.insert(self.active_id, reader);
+
+        for file in files {
+            std::fs::remove_file(file)?;
+        }
+
         Ok(())
     }
+}
 
-    fn read_value(reader: &mut BufPosReader<File>, fp: &FPos) -> Result<Option<String>> {
-        let move_by = (fp.start - reader.pos) as i64;
-        let mut buf = vec![0u8; fp.length];
-        reader.seek(SeekFrom::Current(move_by))?;
-
-        reader.read(&mut buf)?;
-        let buf = String::from_utf8_lossy(&buf);
-        let cmd: Command = serde_json::from_str(&buf)?;
-
-        if let Command::Set { key: _, value } = cmd {
-            Ok(Some(value))
-        } else {
-            Ok(None)
+fn replay(
+    r: &mut BufPosReader<File>,
+    idx: &mut HashMap<String, CmdPos>,
+    f_id: usize,
+) -> Result<usize> {
+    let pos = r.seek(SeekFrom::Start(0))?;
+    let mut pos = pos as usize;
+    let mut stream = serde_json::Deserializer::from_reader(r).into_iter::<Command>();
+    while let Some(value) = stream.next() {
+        let value = value?;
+        // offset represents how many bytes have been read so far
+        let offset = stream.byte_offset();
+        if let Command::Set { key, .. } = value {
+            idx.insert(
+                key,
+                CmdPos {
+                    f_id,
+                    pos,
+                    sz: offset - pos,
+                },
+            );
+        } else if let Command::Rm { key } = value {
+            idx.remove(&key);
         }
+        pos = offset;
     }
+
+    Ok(pos)
 }
 
 struct BufPosWriter<W: Write + Seek> {
@@ -260,6 +317,14 @@ impl<W: Write + Seek> Write for BufPosWriter<W> {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
+    }
+}
+
+impl<W: Write + Seek> Seek for BufPosWriter<W> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let bytes = self.writer.seek(pos)?;
+        self.pos = bytes as usize;
+        Ok(bytes)
     }
 }
 
@@ -293,4 +358,9 @@ impl<R: Read + Seek> Seek for BufPosReader<R> {
         self.pos = bytes as usize;
         Ok(bytes)
     }
+}
+
+// Credit to pingcap guide
+fn log_path(dir: &Path, id: usize) -> PathBuf {
+    dir.join(format!("{}-log.json", id))
 }

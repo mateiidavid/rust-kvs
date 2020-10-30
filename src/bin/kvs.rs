@@ -1,7 +1,5 @@
 use clap::{App, Arg};
 use kvs::Result;
-
-const STORE_DIR: &str = "/Users/madavid/dev/self/code/rust-kvs/store/";
 //TODO: use structopt
 fn main() -> Result<()> {
     let matches = App::new(env!("CARGO_PKG_NAME"))
@@ -26,33 +24,36 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    match matches.subcommand_name() {
-        Some("get") => {
-            let matches = matches.subcommand_matches("get").unwrap();
+    match matches.subcommand() {
+        ("get", Some(matches)) => {
             let key = matches.value_of("KEY").unwrap();
-            let mut store = kvs::KvStore::open(STORE_DIR)?;
-            match store.get(key.to_owned())? {
-                Some(value) => println!("{}", value),
-                None => println!("{}", "Key not found"),
+            let current_dir = std::env::current_dir()?;
+            let mut store = kvs::KvStore::open(current_dir)?;
+            if let Some(v) = store.get(key.to_string())? {
+                println!("{}", v);
+            } else {
+                println!("{}", "Key not found")
             }
-            std::process::exit(0)
         }
-        Some("set") => {
-            let matches = matches.subcommand_matches("set").unwrap();
+        ("set", Some(matches)) => {
             let key = matches.value_of("KEY").unwrap();
             let val = matches.value_of("VALUE").unwrap();
-            kvs::KvStore::open(STORE_DIR)?.set(key.to_owned(), val.to_owned())?;
+            let current_dir = std::env::current_dir()?;
+            let mut store = kvs::KvStore::open(current_dir)?;
+            store.set(key.to_string(), val.to_string())?;
         }
-        Some("rm") => {
-            let matches = matches.subcommand_matches("rm").unwrap();
+        ("rm", Some(matches)) => {
             let key = matches.value_of("KEY").unwrap();
-            let mut store = kvs::KvStore::open(STORE_DIR)?;
-            match store.remove(key.to_owned()) {
-                Ok(()) => std::process::exit(0),
-                Err(_) => {
+            let current_dir = std::env::current_dir()?;
+            let mut store = kvs::KvStore::open(current_dir)?;
+            match store.remove(key.to_string()) {
+                Ok(()) => {}
+                Err(kvs::KvStoreError::Store(kvs::ErrorKind::NotFound)) => {
                     println!("{}", "Key not found");
                     std::process::exit(1)
                 }
+
+                Err(e) => return Err(e),
             }
         }
         _ => {

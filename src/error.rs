@@ -10,15 +10,25 @@ pub enum KvStoreError {
     Store(ErrorKind),
 }
 
+impl KvStoreError {
+    pub fn new(kind: ErrorKind) -> Self {
+        Self::Store(kind)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialOrd, PartialEq, Ord)]
 pub enum ErrorKind {
     NotFound,
+    UnsupportedCommand,
+    CompactionFailed,
 }
 
 impl ErrorKind {
-    fn as_str(&self) -> &str {
-        match self {
+    pub fn as_str(&self) -> &'static str {
+        match *self {
             ErrorKind::NotFound => "Key not found",
+            ErrorKind::UnsupportedCommand => "command is not supported",
+            ErrorKind::CompactionFailed => "log compaction failed",
         }
     }
 }
@@ -28,7 +38,7 @@ impl fmt::Display for KvStoreError {
         match self {
             KvStoreError::Io(err) => err.fmt(f),
             KvStoreError::Serde(err) => err.fmt(f),
-            KvStoreError::Store(err) => write!(f, "KvStore error occurred {:?}", err),
+            KvStoreError::Store(err) => write!(f, "store error occurred {:?}", err),
         }
     }
 }
