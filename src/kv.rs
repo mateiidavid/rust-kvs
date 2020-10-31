@@ -4,7 +4,8 @@ use std::fs::File;
 use std::io::{prelude::*, BufReader, BufWriter, Seek, SeekFrom};
 use std::{collections::HashMap, path::Path, path::PathBuf};
 
-use crate::{ErrorKind, KvStoreError, Result};
+use crate::{ErrorKind, KvsError, Result};
+
 // For now, will pick JSON but as I benchmark I will be thinking
 // of moving to MessagePack
 #[derive(Serialize, Deserialize, Debug)]
@@ -13,6 +14,8 @@ enum Command {
     Set { key: String, value: String },
     Rm { key: String },
 }
+
+const MAX_STORE_SZ: usize = 2048;
 
 /// `KvStore` is a simple struct wrapper over a `std::collection::HashMap` to give some abstraction
 /// to the <KV> store.
@@ -32,20 +35,7 @@ pub struct CmdPos {
     sz: usize,
 }
 
-const MAX_STORE_SZ: usize = 2048;
-//TODO: add env var to open @ specific folder
-/* Todo: compaction
- * To do compaction, we will do this:
- *  - enforce a limit per file (e.g 2kb or whatever)
- *  - open a new file when the limit is reached
- *    - if we reached the file limit after we flush & close the handle
- *      then merge the files together
- *    - the easiest way to merge is to dump all values in a new file & change the file they point
- *    to
- *    - delete the old files and only have the merged one.\
- *    - mark each file as active, the way Bitcask does.
- * Step now: implement total_sz to keep track of size of current active file
-*/
+///
 impl KvStore {
     /// Create a new instance of KvStore by in turn creating a HashMap
     fn new(
@@ -81,7 +71,7 @@ impl KvStore {
             if let Command::Set { key: _, value } = cmd {
                 Ok(Some(value))
             } else {
-                Err(KvStoreError::Store(ErrorKind::UnsupportedCommand))
+                Err(KvsError::Store(ErrorKind::UnsupportedCommand))
             }
         } else {
             Ok(None)
@@ -131,7 +121,7 @@ impl KvStore {
                 Ok(())
             }
         } else {
-            Err(KvStoreError::Store(ErrorKind::NotFound))
+            Err(KvsError::Store(ErrorKind::NotFound))
         }
     }
 
@@ -149,54 +139,51 @@ impl KvStore {
                         None
                     }
                 }
-
                 _ => None,
             })
-            .collect::<Vec<String>>();
+            .map(|s| {
+                s.find('-')
+                    .map(|i| Some(s[..i].to_string()))
+                    .map(|name| {
+                        name.unwrap()
+                            .parse::<usize>()
+                            .expect("file name not supported")
+                    })
+                    .expect("failed to parse file name")
+            })
+            .collect::<Vec<usize>>();
 
         files.sort();
         let mut total_sz = 0usize;
         let mut readers: HashMap<usize, BufPosReader<File>> = HashMap::new();
         let mut idx: HashMap<String, CmdPos> = HashMap::new();
-        for f_name in files.iter() {
-            let file = File::open(path.join(f_name))?;
+        for f_id in files {
+            let file = File::open(log_path(&path, f_id))?;
             let mut reader = BufPosReader::new(file)?;
-            //TODO: Remove unwraps, looks ugly af
-            let f_name = f_name
-                .find('-')
-                .map(|i| Some(f_name[..i].to_owned()))
-                .map(|name| {
-                    name.unwrap()
-                        .parse::<usize>()
-                        .expect("file name not supported")
-                })
-                .expect("failed to parse file name");
-
-            let file_sz = replay(&mut reader, &mut idx, f_name)?;
-            total_sz += file_sz;
-            readers.insert(f_name, reader);
+            total_sz += replay(&mut reader, &mut idx, f_id)?;
+            readers.insert(f_id, reader);
         }
 
         let active_id: usize;
         let active_file: File;
         if let Some(num) = readers.keys().max() {
             active_id = *num;
-            let file_name = format!("{}-log.json", num);
             active_file = std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
                 .write(true)
-                .open(path.join(file_name))?;
+                .open(log_path(&path, active_id))?;
         } else {
             active_id = 0;
+            let file_path = log_path(&path, active_id);
             active_file = std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
                 .write(true)
                 .create(true)
-                .open(path.join("0-log.json"))?;
+                .open(&file_path)?;
 
-            let f = File::open(path.join("0-log.json"))?;
+            let f = File::open(&file_path)?;
             let f = BufPosReader::new(f)?;
             readers.insert(0, f);
         }
@@ -335,7 +322,6 @@ struct BufPosReader<R: Read + Seek> {
 
 impl<R: Read + Seek> BufPosReader<R> {
     fn new(mut f: R) -> Result<Self> {
-        // TODO: do we need this line?
         let pos = f.seek(SeekFrom::Start(0))? as usize;
         Ok(BufPosReader {
             reader: BufReader::new(f),

@@ -10,7 +10,7 @@ ref: https://blog.guillaume-gomez.fr/articles/2020-03-12+Guide+on+how+to+write+d
 guideline: https://rust-lang.github.io/api-guidelines/documentation.html
 */
 
-pub use error::{ErrorKind, KvStoreError, Result};
+pub use error::{ErrorKind, KvsError, Result};
 pub use kv::KvStore;
 mod error;
 mod kv;

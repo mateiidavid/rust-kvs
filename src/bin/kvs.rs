@@ -48,7 +48,7 @@ fn main() -> Result<()> {
             let mut store = kvs::KvStore::open(current_dir)?;
             match store.remove(key.to_string()) {
                 Ok(()) => {}
-                Err(kvs::KvStoreError::Store(kvs::ErrorKind::NotFound)) => {
+                Err(kvs::KvsError::Store(kvs::ErrorKind::NotFound)) => {
                     println!("{}", "Key not found");
                     std::process::exit(1)
                 }
